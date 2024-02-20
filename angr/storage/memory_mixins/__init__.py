@@ -5,7 +5,7 @@ import claripy
 
 from ...state_plugins.plugin import SimStatePlugin
 from ...errors import SimMemoryError
-
+from ... import sim_options as options
 
 class MemoryMixin(SimStatePlugin):
     SUPPORTS_CONCRETE_LOAD = False
@@ -380,6 +380,10 @@ class JavaVmMemory(
     pass
 
 
+class FullSymMemory():
+    pass
+
+
 from angr.sim_state import SimState
 
 SimState.register_default("sym_memory", DefaultMemory)
@@ -387,3 +391,4 @@ SimState.register_default("fast_memory", FastMemory)
 SimState.register_default("abs_memory", AbstractMemory)
 SimState.register_default("keyvalue_memory", KeyValueMemory)
 SimState.register_default("javavm_memory", JavaVmMemory)
+SimState.register_default("full_sym_memory", FullSymMemory)

@@ -57,6 +57,9 @@ SYMBOLIC_INITIAL_VALUES = "SYMBOLIC_INITIAL_VALUES"
 # this causes angr to use SimAbstractMemory for the memory region
 ABSTRACT_MEMORY = "ABSTRACT_MEMORY"
 
+# this causes angr to use SimFullMemory for the memory region
+FULL_SYMBOLIC_MEMORY = "FULL_SYMBOLIC_MEMORY"
+
 # This causes symbolic memory to avoid performing symbolic reads and writes. Unconstrained results
 # are returned instead, if these options are present.
 AVOID_MULTIVALUED_READS = "AVOID_MULTIVALUED_READS"

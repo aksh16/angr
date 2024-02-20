@@ -380,8 +380,15 @@ class JavaVmMemory(
     pass
 
 
-class FullSymMemory():
-    pass
+class FullSymMemory(
+    DataNormalizationMixin
+):
+    def get_unconstrained_bytes(self, name, bits, memory=None):
+        if (memory is not None and memory.category == 'mem' and
+                options.ZERO_FILL_UNCONSTRAINED_MEMORY in self.state.options):
+            return claripy.BVV(0, bits)
+        state = self.state
+        return state.solver.Unconstrained(name, bits)
 
 
 from angr.sim_state import SimState

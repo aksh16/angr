@@ -9,6 +9,7 @@ from ailment import Block, Expr, Stmt, Tmp
 from ailment.expression import StackBaseOffset, BinaryOp
 from unique_log_filter import UniqueLogFilter
 
+from ....procedures import SIM_LIBRARIES, SIM_TYPE_COLLECTIONS
 from ....sim_type import (
     SimTypeLongLong,
     SimTypeInt,
@@ -28,6 +29,7 @@ from ....sim_type import (
     SimTypeFixedSizeArray,
     SimTypeLength,
     SimTypeReg,
+    dereference_simtype,
 )
 from ....knowledge_plugins.functions import Function
 from ....sim_variable import SimVariable, SimTemporaryVariable, SimStackVariable, SimMemoryVariable
@@ -390,6 +392,7 @@ class CFunction(CConstruct):  # pylint:disable=abstract-method
         "demangled_name",
         "unified_local_vars",
         "show_demangled_name",
+        "omit_header",
     )
 
     def __init__(
@@ -403,6 +406,7 @@ class CFunction(CConstruct):  # pylint:disable=abstract-method
         variable_manager,
         demangled_name=None,
         show_demangled_name=True,
+        omit_header=False,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -417,6 +421,7 @@ class CFunction(CConstruct):  # pylint:disable=abstract-method
         self.demangled_name = demangled_name
         self.unified_local_vars: Dict[SimVariable, Set[Tuple[CVariable, SimType]]] = self.get_unified_local_vars()
         self.show_demangled_name = show_demangled_name
+        self.omit_header = omit_header
 
     def get_unified_local_vars(self) -> Dict[SimVariable, Set[Tuple["CVariable", SimType]]]:
         unified_to_var_and_types: Dict[SimVariable, Set[Tuple[CVariable, SimType]]] = defaultdict(set)
@@ -521,8 +526,17 @@ class CFunction(CConstruct):  # pylint:disable=abstract-method
             yield "\n", None
 
     def c_repr_chunks(self, indent=0, asexpr=False):
-        indent_str = self.indent_str(indent)
+        if self.omit_header:
+            yield from self.headerless_c_repr_chunks(indent=indent)
+        else:
+            yield from self.full_c_repr_chunks(indent=indent, asexpr=asexpr)
 
+    def headerless_c_repr_chunks(self, indent=0):
+        yield from self.statements.c_repr_chunks(indent=indent)
+        yield "\n", None
+
+    def full_c_repr_chunks(self, indent=0, asexpr=False):
+        indent_str = self.indent_str(indent)
         if self.codegen.show_local_types:
             local_types = [unpack_typeref(ty) for ty in self.variable_manager.types.iter_own()]
             for ty in local_types:
@@ -1222,7 +1236,16 @@ class CFunctionCall(CStatement, CExpression):
     @property
     def prototype(self) -> Optional[SimTypeFunction]:  # TODO there should be a prototype for each callsite!
         if self.callee_func is not None and self.callee_func.prototype is not None:
-            return self.callee_func.prototype
+            proto = self.callee_func.prototype
+            if self.callee_func.prototype_libname is not None:
+                # we need to deref the prototype in case it uses SimTypeRef internally
+                type_collections = []
+                prototype_lib = SIM_LIBRARIES[self.callee_func.prototype_libname]
+                if prototype_lib.type_collection_names:
+                    for typelib_name in prototype_lib.type_collection_names:
+                        type_collections.append(SIM_TYPE_COLLECTIONS[typelib_name])
+                    proto = dereference_simtype(proto, type_collections)
+            return proto
         returnty = SimTypeInt(signed=False)
         return SimTypeFunction([arg.type for arg in self.args], returnty).with_arch(self.codegen.project.arch)
 
@@ -2344,6 +2367,7 @@ class CStructuredCodeGenerator(BaseStructuredCodeGenerator, Analysis):
         ail_graph=None,
         simplify_else_scope=True,
         cstyle_ifs=True,
+        omit_func_header=False,
     ):
         super().__init__(flavor=flavor)
 
@@ -2411,6 +2435,7 @@ class CStructuredCodeGenerator(BaseStructuredCodeGenerator, Analysis):
         self.ail_graph = ail_graph
         self.simplify_else_scope = simplify_else_scope
         self.cstyle_ifs = cstyle_ifs
+        self.omit_func_header = omit_func_header
         self.text = None
         self.map_pos_to_node = None
         self.map_pos_to_addr = None
@@ -2474,6 +2499,7 @@ class CStructuredCodeGenerator(BaseStructuredCodeGenerator, Analysis):
             demangled_name=self._func.demangled_name,
             show_demangled_name=self.show_demangled_name,
             codegen=self,
+            omit_header=self.omit_func_header,
         )
         self.cfunc = FieldReferenceCleanup.handle(self.cfunc)
         self.cfunc = PointerArithmeticFixer.handle(self.cfunc)

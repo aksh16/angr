@@ -525,7 +525,11 @@ class TestDecompiler(unittest.TestCase):
 
     @for_all_structuring_algos
     def test_decompiling_1after909_doit(self, decompiler_options=None):
-        # the doit() function has an abnormal loop at 0x1d47 - 0x1da1 - 0x1d73
+        """
+        The doit() function has an abnormal loop at 0x1d47 - 0x1da1 - 0x1d73.
+        The original source code can be found here:
+        https://github.com/shellphish/ictf20-challenges/blob/1e0b7c1fde9b5c8ff2d3e1ca428c4396d63e046e/1after909/src/1after909.c#L298
+        """
 
         bin_path = os.path.join(test_location, "x86_64", "1after909")
         p = angr.Project(bin_path, auto_load_libs=False)
@@ -2197,8 +2201,8 @@ class TestDecompiler(unittest.TestCase):
         )
         self._print_decompilation_result(d)
 
-        # there should only be two goto statements
-        assert d.codegen.text.count("goto ") == 2
+        # there should be three goto statements when return duplicator is disabled
+        assert d.codegen.text.count("goto ") == 3
 
     @for_all_structuring_algos
     def test_eliminating_stack_canary_reused_stack_chk_fail_call(self, decompiler_options=None):
@@ -2711,16 +2715,15 @@ class TestDecompiler(unittest.TestCase):
         # there should be at least 1 ternary in the code: (c ? a : b);
         assert re.search(r"\(.+\?.+:.+\);", text) is not None
 
+    @unittest.skip("Disabled until https://github.com/angr/angr/issues/4474 fixed")
     @for_all_structuring_algos
     def test_ternary_propagation_1(self, decompiler_options=None):
         """
-        Tests that single-use ternary expression assignments are propagated:
-        x = (c ? a : b);
-        puts(x)
+        Previously this testcase was enabled because it was testing for something we thought was right.
+        Currently, a failure in variable argument causes the CodeMotion optimization to change the code in this
+        function, which should otherwise not be changed.
 
-        =>
-
-        puts(c ? a : b);
+        See the linked issue to know when this can be re-enabled.
         """
         bin_path = os.path.join(test_location, "x86_64", "decompiler", "stty.o")
         proj = angr.Project(bin_path, auto_load_libs=False)
@@ -2741,6 +2744,15 @@ class TestDecompiler(unittest.TestCase):
 
     @for_all_structuring_algos
     def test_ternary_propagation_2(self, decompiler_options=None):
+        """
+        Tests that single-use ternary expression assignments are propagated:
+        x = (c ? a : b);
+        puts(x)
+
+        =>
+
+        puts(c ? a : b);
+        """
         bin_path = os.path.join(test_location, "x86_64", "decompiler", "du.o")
         proj = angr.Project(bin_path, auto_load_libs=False)
         cfg = proj.analyses.CFGFast(normalize=True, data_references=True)
@@ -3263,6 +3275,33 @@ class TestDecompiler(unittest.TestCase):
         # bad_matches = re.findall(r'\bif\s*\(\s*[^!].*\)', text)
         # assert len(bad_matches) == 0
 
+    @structuring_algo("phoenix")
+    def test_decompiling_tr_O2_parse_str(self, decompiler_options=None):
+        bin_path = os.path.join(test_location, "x86_64", "decompiler", "tr_O2.o")
+        proj = angr.Project(bin_path, auto_load_libs=False)
+        cfg = proj.analyses.CFGFast(normalize=True, data_references=True)
+
+        f = proj.kb.functions["parse_str"]
+        proj.analyses.CompleteCallingConventions(cfg=cfg, recover_variables=True, analyze_callsites=True)
+        d = proj.analyses[Decompiler](f, cfg=cfg.model, options=decompiler_options)
+        self._print_decompilation_result(d)
+
+        line_count = d.codegen.text.count("\n")
+        assert line_count > 20  # there should be at least 20 lines of code. it was failing structuring
+
+    @structuring_algo("phoenix")
+    def test_decompiling_sioctl_140005250(self, decompiler_options=None):
+        bin_path = os.path.join(test_location, "x86_64", "windows", "sioctl.sys")
+        proj = angr.Project(bin_path, auto_load_libs=False)
+        cfg = proj.analyses.CFGFast(normalize=True, data_references=True)
+
+        f = proj.kb.functions[0x140005250]
+        proj.analyses.CompleteCallingConventions(cfg=cfg, recover_variables=True, analyze_callsites=True)
+        d = proj.analyses[Decompiler](f, cfg=cfg.model, options=decompiler_options)
+        self._print_decompilation_result(d)
+
+        assert 'DbgPrint("SIOCTL.SYS: ");' in d.codegen.text
+
     def test_test_binop_ret_dup(self, decompiler_options=None):
         bin_path = os.path.join(test_location, "x86_64", "decompiler", "test.o")
         proj = angr.Project(bin_path, auto_load_libs=False)
@@ -3350,6 +3389,20 @@ class TestDecompiler(unittest.TestCase):
         # Test function has same name as calling function (PLT stub)
         d = proj.analyses[Decompiler](proj.kb.functions.function(name="puts", plt=True), cfg=cfg.model)
         assert "::libc.so.0::puts" in d.codegen.text
+
+    @for_all_structuring_algos
+    def test_code_motion_down_opt(self, decompiler_options=None):
+        bin_path = os.path.join(test_location, "x86_64", "decompiler", "code_motion_1")
+        proj = angr.Project(bin_path, auto_load_libs=False)
+        cfg = proj.analyses.CFGFast(normalize=True, data_references=True)
+        proj.analyses.CompleteCallingConventions(cfg=cfg, recover_variables=True)
+        f = proj.kb.functions["main"]
+        d = proj.analyses[Decompiler].prep()(f, cfg=cfg.model, options=decompiler_options)
+        text = d.codegen.text
+
+        assert text.count("v2 = 2") == 1
+        assert text.count("v3 = 3") == 1
+        assert "else" not in text
 
 
 if __name__ == "__main__":

@@ -2,7 +2,7 @@
 from collections import OrderedDict, defaultdict, ChainMap
 import copy
 import re
-from typing import Optional, Dict, Any, Tuple, List, Union
+from typing import Optional, Dict, Any, Tuple, List, Union, Type, TYPE_CHECKING
 import logging
 
 try:
@@ -18,7 +18,11 @@ except ImportError:
 from archinfo import Endness
 import claripy
 
+from angr.errors import AngrMissingTypeError
 from .misc.ux import deprecated
+
+if TYPE_CHECKING:
+    from angr.procedures.definitions import SimTypeCollection
 
 
 l = logging.getLogger(name=__name__)
@@ -46,15 +50,23 @@ class SimType:
         """
         self.label = label
 
-    def __eq__(self, other):
+    def __eq__(self, other, avoid=None):
         if type(self) != type(other):
             return False
 
         for attr in self._fields:
             if attr == "size" and self._arch is None and other._arch is None:
                 continue
-            if getattr(self, attr) != getattr(other, attr):
-                return False
+            attr_self = getattr(self, attr)
+            attr_other = getattr(other, attr)
+            if isinstance(attr_self, SimType):
+                if avoid is not None and attr_self in avoid["self"] and attr_other in avoid["other"]:
+                    continue
+                if not attr_self.__eq__(attr_other, avoid=avoid):
+                    return False
+            else:
+                if attr_self != attr_other:
+                    return False
 
         return True
 
@@ -150,7 +162,7 @@ class TypeRef(SimType):
         """
         return self._name
 
-    def __eq__(self, other):
+    def __eq__(self, other, avoid=None):
         return type(other) is TypeRef and self.type == other.type
 
     def __hash__(self):
@@ -1112,7 +1124,6 @@ class SimStruct(NamedTypeMixin, SimType):
 
         self._pack = pack
         self._align = align
-        self._pack = pack
         self.fields = fields
 
         self._arch_memo = {}
@@ -1246,10 +1257,10 @@ class SimStruct(NamedTypeMixin, SimType):
 
     @staticmethod
     def _field_str(field_name, field_type):
-        return f'"{field_name}": {field_type._init_str()}'
+        return f'("{field_name}", {field_type._init_str()})'
 
     def _init_str(self):
-        return '{}({{{}}}, name="{}", pack={}, align={})'.format(
+        return '{}(OrderedDict(({},)), name="{}", pack={}, align={})'.format(
             self.__class__.__name__,
             ", ".join([self._field_str(f, ty) for f, ty in self.fields.items()]),
             self._name,
@@ -1259,6 +1270,35 @@ class SimStruct(NamedTypeMixin, SimType):
 
     def copy(self):
         return SimStruct(dict(self.fields), name=self.name, pack=self._pack, align=self._align)
+
+    def __eq__(self, other, avoid=None):
+        if not isinstance(other, SimStruct):
+            return False
+        if not (
+            self._pack == other._pack
+            and self._align == other._align
+            and self.label == other.label
+            and self._name == other._name
+            and self._arch == other._arch
+        ):
+            return False
+        # fields comparison that accounts for self references
+        if not self.fields and not other.fields:
+            return True
+        keys_self = list(self.fields)
+        keys_other = list(other.fields)
+        if keys_self != keys_other:
+            return False
+        if avoid is None:
+            avoid = {"self": {self}, "other": {other}}
+        for key in keys_self:
+            field_self = self.fields[key]
+            field_other = other.fields[key]
+            if field_self in avoid["self"] and field_other in avoid["other"]:
+                continue
+            if not field_self.__eq__(field_other, avoid=avoid):
+                return False
+        return True
 
 
 class SimStructValue:
@@ -1588,6 +1628,37 @@ class SimTypeNumOffset(SimTypeNum):
 
     def copy(self):
         return SimTypeNumOffset(self.size, signed=self.signed, label=self.label, offset=self.offset)
+
+
+class SimTypeRef(SimType):
+    """
+    SimTypeRef is a to-be-resolved reference to another SimType.
+
+    SimTypeRef is not SimTypeReference.
+    """
+
+    def __init__(self, name, original_type: Type[SimStruct]):
+        super().__init__(label=name)
+        self.original_type = original_type
+
+    @property
+    def name(self) -> str:
+        return self.label
+
+    def set_size(self, v: int):
+        self._size = v
+
+    def c_repr(self, name=None, full=0, memo=None, indent=0) -> str:
+        prefix = "unknown"
+        if self.original_type is SimStruct:
+            prefix = "struct"
+        if name is None:
+            name = ""
+        return f"{prefix}{name} {self.name}"
+
+    def _init_str(self) -> str:
+        original_type_name = self.original_type.__name__.split(".")[-1]
+        return f'SimTypeRef("{self.name}", {original_type_name})'
 
 
 ALL_TYPES = {}
@@ -3194,6 +3265,66 @@ def parse_cpp_file(cpp_decl, with_param_names: bool = False):
         func_decls[func_name] = proto
 
     return func_decls, {}
+
+
+def dereference_simtype(
+    t: SimType, type_collections: List["SimTypeCollection"], memo: Optional[Dict[str, SimType]] = None
+) -> SimType:
+    if memo is None:
+        memo = {}
+
+    if isinstance(t, SimTypeRef):
+        real_type = None
+
+        if t.name in memo:
+            return memo[t.name]
+
+        if type_collections:
+            for tc in type_collections:
+                try:
+                    real_type = tc.get(t.name)
+                    break
+                except AngrMissingTypeError:
+                    continue
+        if real_type is None:
+            raise AngrMissingTypeError(f"Missing type {t.name}")
+        return dereference_simtype(real_type, type_collections, memo=memo)
+
+    # the following code prepares a real_type SimType object that will be returned at the end of this method
+    if isinstance(t, SimStruct):
+        if t.name in memo:
+            return memo[t.name]
+
+        real_type = t.copy()
+        memo[t.name] = real_type
+        fields = OrderedDict((k, dereference_simtype(v, type_collections, memo=memo)) for k, v in t.fields.items())
+        real_type.fields = fields
+    elif isinstance(t, SimTypePointer):
+        real_pts_to = dereference_simtype(t.pts_to, type_collections, memo=memo)
+        real_type = t.copy()
+        real_type.pts_to = real_pts_to
+    elif isinstance(t, SimTypeArray):
+        real_elem_type = dereference_simtype(t.elem_type, type_collections, memo=memo)
+        real_type = t.copy()
+        real_type.elem_type = real_elem_type
+    elif isinstance(t, SimUnion):
+        real_members = {k: dereference_simtype(v, type_collections, memo=memo) for k, v in t.members.items()}
+        real_type = t.copy()
+        real_type.members = real_members
+    elif isinstance(t, SimTypeFunction):
+        real_args = [dereference_simtype(arg, type_collections, memo=memo) for arg in t.args]
+        real_return_type = (
+            dereference_simtype(t.returnty, type_collections, memo=memo) if t.returnty is not None else None
+        )
+        real_type = t.copy()
+        real_type.args = real_args
+        real_type.returnty = real_return_type
+    else:
+        return t
+
+    if t._arch is not None:
+        real_type = real_type.with_arch(t._arch)
+    return real_type
 
 
 if pycparser is not None:

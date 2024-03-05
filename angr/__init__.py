@@ -1,7 +1,7 @@
 # pylint: disable=wildcard-import
 # pylint: disable=wrong-import-position
 
-__version__ = "9.2.89.dev0"
+__version__ = "9.2.93.dev0"
 
 if bytes is str:
     raise Exception(
@@ -44,7 +44,7 @@ import_fake_pkg_resources(force=False)
 
 # this must happen first, prior to initializing analyses
 from .sim_procedure import SimProcedure
-from .procedures import SIM_PROCEDURES, SimProcedures, SIM_LIBRARIES
+from .procedures import SIM_PROCEDURES, SimProcedures, SIM_LIBRARIES, SIM_TYPE_COLLECTIONS
 
 from . import sim_options
 
@@ -102,6 +102,7 @@ __all__ = (
     "SimProcedure",
     "SIM_PROCEDURES",
     "SIM_LIBRARIES",
+    "SIM_TYPE_COLLECTIONS",
     "sim_options",
     "options",
     "BP_BEFORE",

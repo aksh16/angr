@@ -193,6 +193,19 @@ class SimState(PluginHub):
                 sim_memory_cls = self.plugin_preset.request_plugin("fast_memory")
                 sim_memory = sim_memory_cls(memory_id="mem")
 
+            elif o.FULL_SYMBOLIC_MEMORY in self.options:
+                sim_memory_cls = self.plugin_preset.request_plugin("full_sym_memory")
+                sim_memory = sim_memory_cls(
+                    arch=arch,
+                    cle_memory_backer=cle_memory_backer, #memory_backer
+                    memory_id="mem",                    #kind
+                    permissions_map=permissions_map,    #permissions_backer
+                    mapped_regions=[],                  #mapped_regions
+                    stack_perms=stack_perms,
+                    stack_end=stack_end,                #recreate stack_range
+                    stack_size=stack_size,              #recreate stack_range
+                )
+
             else:
                 sim_memory_cls = self.plugin_preset.request_plugin("sym_memory")
                 sim_memory = sim_memory_cls(

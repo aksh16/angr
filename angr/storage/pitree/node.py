@@ -99,17 +99,8 @@ class Node(object):
             ris.append(self.interval)
         if self.left_child is not None and self.left_child.max >= point:
             self.left_child.search_point(point, ris)
-        if self.right_child is not None and self.interval.begin <= point and self.right_child.max >= point:
+        if self.right_child is not None and self.interval.begin <= point <= self.right_child.max:
             self.right_child.search_point(point, ris)
-
-    # complexity is O(n), only for debug purpose. Not needed in actual implementation
-    def linear_search(self, interval, ris):
-        if interval.overlap(self.interval):
-            ris.append(self.interval)
-        if self.left_child is not None:
-            self.left_child.linear_search(interval, ris)
-        if self.right_child is not None:
-            self.right_child.linear_search(interval, ris)
 
     def add(self, interval):
         if self.max < interval.end:

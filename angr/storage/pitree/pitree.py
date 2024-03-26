@@ -93,8 +93,6 @@ class page:
 # pitree
 # ----------------------------------------------------------------------
 class pitree:
-    stats = collections.namedtuple('stats',
-                                   'num_pages num_intervals num_1_intervals is_lazy_tree num_lazy_pages max_page_size, size, sum_range, max_range')
 
     def __init__(self, page_size=128):
         self._pages = IntervalTree()

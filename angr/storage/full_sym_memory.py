@@ -12,8 +12,34 @@ import cle
 from ..state_plugins.sim_action_object import _raw_ast
 from ..state_plugins import SimStatePlugin, SimStateHistory, SimActionData
 from ..state_plugins import inspect as stateplug_inspect
-from sortedcontainers import SortedList
-from ..errors import SimSegfaultError
+from sortedcontainers import SortedDict
+from ..errors import SimSegfaultError, SimMemoryError
+
+
+class MappedRegion(object):
+    PROT_READ = 1
+    PROT_WRITE = 2
+    PROT_EXEC = 4
+
+    def __init__(self, addr, length, permissions):
+        self.addr = addr
+        self.length = length
+        self.permissions = permissions
+
+    def __repr__(self):
+        rwx_s = "r" if self.is_readable() else ''
+        rwx_s += "w" if self.is_writable() else ''
+        rwx_s += "x" if self.is_executable() else ''
+        return "(" + str(hex(self.addr)) + ", " + str(hex(self.addr + self.length)) + ") [" + rwx_s + "]"
+
+    def is_readable(self):
+        return self.permissions.args[0] & MappedRegion.PROT_READ
+
+    def is_writable(self):
+        return self.permissions.args[0] & MappedRegion.PROT_WRITE
+
+    def is_executable(self):
+        return self.permissions.args[0] & MappedRegion.PROT_EXEC
 
 
 class MemoryItem(object):
@@ -111,7 +137,7 @@ class FullSymbolicMemory(
         self._memory_backer = cle_memory_backer
         self.kind = memory_id
         self.permissions_backer = permissions_map
-        self._initializable = initializable if initializable is not None else SortedList(key=lambda x: x[0])
+        self._initializable = initializable if initializable is not None else SortedDict(key=lambda x: x[0])
         self._initialized = initialized
         self._symbolic_memory = pitree.pitree() if symbolic_memory is None else symbolic_memory
         # TODO: Need to figure what mixin to call for a pass through for ultra page
@@ -181,7 +207,7 @@ class FullSymbolicMemory(
             while size > 0:
                 max_bytes_in_page = page_index * 0x1000 + 0x1000 - addr
                 mo = [page_index, obj, data_offset, page_offset, min([size, page_size, max_bytes_in_page])]
-                self._initializable.add(mo)
+                self._initializable[page_index] = mo
                 page_index += 1
                 size -= page_size - page_offset
                 data_offset += page_size - page_offset
@@ -217,7 +243,7 @@ class FullSymbolicMemory(
             k += 1
 
         for e in to_remove:
-            self._initializable.remove(e)
+            del self._initializable[e]
 
     def memory_op(self, addr, size, data=None, op=None):
         addr = _raw_ast(addr)
@@ -290,13 +316,13 @@ class FullSymbolicMemory(
         return self.state.se.If(cond, v, obj)
 
     # If we have build ite, we also need build merged ite
-    def build_merged_ite(self, addr, P, obj):
+    def build_merged_ite(self, addr, pointer, obj):
 
-        N = len(P)
+        n = len(pointer)
         merged_p = []
-        for i in range(N):
+        for i in range(n):
 
-            p = P[i]
+            p = pointer[i]
             v = p.obj
 
             is_good_candidate = type(p.addr) in int and p.guard is None
@@ -379,7 +405,7 @@ class FullSymbolicMemory(
 
         count = self._merge_concrete_memory(others[0], merge_conditions)
         count += self._merge_symbolic_memory(others[0], merge_conditions, ancestor_timestamp,
-                                             ancestor_implicit_timestamp)
+                                            ancestor_implicit_timestamp)
 
         self.timestamp = max(self.timestamp, others[0].timestamp) + 1
         self.implicit_timestamp = min(self.implicit_timestamp, others[0].implicit_timestamp)
@@ -417,7 +443,6 @@ class FullSymbolicMemory(
             try:
                 assert not self.state.se.symbolic(size)
             except Exception as e:
-                import pdb
                 pdb.set_trace()
 
             if type(size) in int:
@@ -486,7 +511,7 @@ class FullSymbolicMemory(
                         self.state._inspect('reg_read', stateplug_inspect.BP_AFTER, reg_read_expr=data)
                         data = self.state._inspect_getattr("reg_read_expr", data)
 
-                if not disable_actions and self.angr_memory is None:
+                if not disable_actions:
                     if options.AUTO_REFS in self.state.options and action is None and not self._abstract_backer:
                         ref_size = size * self.state.arch.byte_width if size is not None else data.size()
                         region_type = self.category
@@ -576,7 +601,7 @@ class FullSymbolicMemory(
                 self.state.se.add(self.state.se.ULE(size, conditional_size[1]))
 
             # convert data to BVV if concrete
-            data = self._convert_to_ast(self.state, data, size if isinstance(size, int) else None,
+            data = self._convert_to_ast(data, size if isinstance(size, int) else None,
                                         self.state.arch.byte_width)
 
             if isinstance(size, int) or conditional_size is not None:
@@ -693,17 +718,6 @@ class FullSymbolicMemory(
 
                 if priv is not None:
                     self.state.scratch.pop_priv()
-
-                if self.angr_memory is not None:
-
-                    try:
-
-                        addrs = [x for x in range(min_addr, max_addr + self.state.se.max_int(size))]
-                        self._compare_with_angr(addrs, op='store')
-
-                    except Exception as e:
-                        pdb.set_trace()
-
                 return
 
             assert False
@@ -717,3 +731,258 @@ class FullSymbolicMemory(
             print(str(e))
             traceback.print_exc()
             sys.exit(1)
+
+    @property
+    def category(self):
+        return self._id
+
+    @property
+    def id(self):
+        return self._id
+
+    def map_region(self, addr, length, permissions):
+        if hasattr(self.state, 'state_counter'):
+            self.state.state_counter.log.append("[" + hex(self.state.regs.ip.args[0]) + "] " + "Map Region")
+
+        if self.state.se.symbolic(addr) or self.state.se.symbolic(length):
+            assert False
+
+        # make if concrete
+        if isinstance(addr, claripy.ast.bv.BV):
+            addr = self.state.se.max_int(addr)
+
+        # make perms a bitvector to easily check them
+        if isinstance(permissions, int):
+            permissions = claripy.BVV(permissions, 3)
+
+        # keep track of this region
+        self._mapped_regions.append(MappedRegion(addr, length, permissions))
+
+        # sort mapped regions
+        self._mapped_regions = sorted(self._mapped_regions, key=lambda x: x.addr)
+
+    def permissions(self, addr):
+
+        if self.state.se.symbolic(addr):
+            assert False
+
+        if isinstance(addr, claripy.ast.bv.BV):
+            addr = self.state.se.eval(addr)
+
+        for region in self._mapped_regions:
+            if region.addr <= addr <= region.addr + region.length:
+                return region.permissions
+
+        raise SimMemoryError("page does not exist at given address")
+
+    def check_sigsegv_and_refine(self, addr, min_addr, max_addr, write_access):
+
+        if options.STRICT_PAGE_ACCESS not in self.state.options:
+            return
+
+        try:
+
+            access_type = "write" if write_access else "read"
+
+            if len(self._mapped_regions) == 0:
+                raise SimSegfaultError(min_addr, "Invalid " + access_type + " access: [" + str(
+                    hex(min_addr)) + ", " + str(hex(max_addr)) + "]")
+
+            last_covered_addr = min_addr - 1
+            for region in self._mapped_regions:
+
+                # region is after our range addr
+                if max_addr < region.addr:
+                    break
+
+                # region is before our range addr
+                if last_covered_addr + 1 > region.addr + region.length:
+                    continue
+
+                # there is one addr in our range that could be not covered by any region
+                if last_covered_addr + 1 < region.addr:
+
+                    # check with the solver: is there a solution for addr?
+                    if self.state.se.satisfiable(
+                            extra_constraints=(addr >= last_covered_addr + 1, addr < region.addr,)):
+                        raise SimSegfaultError(last_covered_addr + 1,
+                                               "Invalid " + access_type + " access: [" + str(
+                                                   hex(min_addr)) + ", " + str(hex(max_addr)) + "]")
+
+                # last_covered_addr + 1 is inside this region
+                # let's check for permissions
+
+                upper_addr = min(region.addr + region.length, max_addr)
+                if access_type == 'write':
+                    if not region.is_writable() and self.state.se.satisfiable(
+                            extra_constraints=(addr >= last_covered_addr + 1, addr <= upper_addr,)):
+                        raise SimSegfaultError(last_covered_addr + 1,
+                                               "Invalid " + access_type + " access: [" + str(
+                                                   hex(min_addr)) + ", " + str(hex(max_addr)) + "]")
+
+                elif access_type == 'read':
+                    if not region.is_readable() and self.state.se.satisfiable(
+                            extra_constraints=(addr >= last_covered_addr + 1, addr <= upper_addr,)):
+                        raise SimSegfaultError(last_covered_addr + 1,
+                                               "Invalid " + access_type + " access: [" + str(
+                                                   hex(min_addr)) + ", " + str(hex(max_addr)) + "]")
+
+                if max_addr > region.addr + region.length:
+                    last_covered_addr = region.addr + region.length
+                else:
+                    last_covered_addr = max_addr
+
+            # last region could not cover up to max_addr
+            if last_covered_addr < max_addr:
+                # we do not need to check with the solver since max_addr is already a valid solution for addr
+                raise SimSegfaultError(last_covered_addr + 1, "Invalid " + access_type + " access: [" + str(
+                    hex(min_addr)) + ", " + str(hex(max_addr)) + "]")
+
+        except Exception as e:
+            raise e
+
+    def _merge_concrete_memory(self, other, merge_conditions):
+        try:
+            assert self._stack_range == other._stack_range
+
+            missing_self = set(self._initializable.keys()) - set(other._initializable.keys())
+            for index in missing_self:
+                self._load_init_data(index * 0x1000, 1)
+
+            assert len(set(self._initializable.keys()) - set(other._initializable.keys())) == 0
+
+            missing_other = set(other._initializable.keys()) - set(self._initializable.keys())
+            for index in missing_other:
+                other._load_init_data(index * 0x1000, 1)
+
+            assert len(set(other._initializable.keys()) - set(self._initializable.keys())) == 0
+
+            count = 0
+
+            page_indexes = set(self._concrete_memory._pages.keys())
+            page_indexes |= set(other._concrete_memory._pages.keys())
+
+            # assert len(page_indexes) == 0
+
+            for page_index in page_indexes:
+
+                # print "merging next page..."
+
+                page_self = self._concrete_memory._pages[
+                    page_index] if page_index in self._concrete_memory._pages else None
+                page_other = other._concrete_memory._pages[
+                    page_index] if page_index in other._concrete_memory._pages else None
+
+                # shared page? if yes, do no touch it
+                if id(page_self) == id(page_other):
+                    continue
+
+                offsets = set(page_self.keys()) if page_self is not None else set()
+                offsets |= set(page_other.keys()) if page_other is not None else set()
+
+                for offset in offsets:
+
+                    v_self = page_self[offset] if page_self is not None and offset in page_self else None
+                    v_other = page_other[offset] if page_other is not None and offset in page_other else None
+
+                    if type(v_self) not in (list,) and type(v_other) not in (list,):
+
+                        if v_self is not None and v_other is not None:
+                            assert v_self.addr == v_other.addr
+                            pass
+
+                        same_value = v_self == v_other
+                    else:
+                        if type(v_self) is not type(v_other):
+                            same_value = False
+                        elif len(v_self) is not len(v_other):
+                            same_value = False
+                        else:
+                            same_value = True
+                            for k in range(len(v_self)):  # we only get equality when items are in the same order
+
+                                sub_v_self = v_self[k]
+                                sub_v_other = v_other[k]
+
+                                assert type(sub_v_self) not in (list,)
+                                assert type(sub_v_other) not in (list,)
+                                assert sub_v_self.addr == sub_v_other.addr
+
+                                if sub_v_self != sub_v_other:
+                                    same_value = False
+                                    break
+
+                    # self has an initialized value that is missing in other
+                    # we can keep as it is.
+                    if v_other is None and v_self is not None and type(v_self) is not (
+                            list,) and v_self.t == 0 and v_self.guard is None:
+                        same_value = True
+
+                    # Symmetric case. We need to insert in self.
+                    if v_self is None and v_other is not None and type(v_other) is not (
+                            list,) and v_other.t == 0 and v_other.guard is None:
+                        self._concrete_memory[page_index * 0x1000 + offset] = v_other
+                        same_value = True
+
+                    if page_index * 0x1000 + offset == 134561792:
+                        # pdb.set_trace()
+                        pass
+
+                    if not same_value:
+                        count += 1
+                        merged_value = self._copy_symbolic_items_and_apply_guard(v_self, merge_conditions[
+                            0]) + self._copy_symbolic_items_and_apply_guard(v_other, merge_conditions[1])
+                        assert len(merged_value) > 0
+                        self._concrete_memory[page_index * 0x1000 + offset] = merged_value if len(merged_value) > 1 else \
+                            merged_value[0]
+
+            return count
+
+        except Exception as e:
+            pdb.set_trace()
+
+    def _copy_symbolic_items_and_apply_guard(self, L, guard):
+        if L is None:
+            return []
+        if type(L) not in (list,):
+            L = [L]
+        LL = []
+        for l in L:
+            l = l.copy()
+            l.guard = claripy.And(l.guard, guard) if l.guard is not None else guard
+            LL.append(l)
+        return LL
+
+    def _merge_symbolic_memory(self, other, merge_conditions, ancestor_timestamp, ancestor_timestamp_implicit,
+                               verbose=False):
+        try:
+            count = 0
+            pointer = self._symbolic_memory.search(0, sys.maxsize * 2 + 1)
+            for p in pointer:
+                # assert p.data.t >= 0
+                if (p.data.t > 0 and p.data.t >= ancestor_timestamp) or (
+                        p.data.t < 0 and p.data.t <= ancestor_timestamp_implicit):
+                    guard = claripy.And(p.data.guard, merge_conditions[0]) if p.data.guard is not None else \
+                        merge_conditions[0]
+                    i = MemoryItem(p.data.addr, p.data.obj, p.data.t, guard)
+                    self._symbolic_memory.update_item(p, i)
+                    count += 1
+        except Exception as e:
+            error = 1
+            pdb.set_trace()
+
+        try:
+            pointer = other._symbolic_memory.search(0, sys.maxsize * 2 + 1)
+            for p in pointer:
+                # assert p.data.t >= 0
+                if (p.data.t > 0 and p.data.t >= ancestor_timestamp) or (
+                        p.data.t < 0 and p.data.t <= ancestor_timestamp_implicit):
+                    guard = claripy.And(p.data.guard, merge_conditions[1]) if p.data.guard is not None else \
+                        merge_conditions[1]
+                    i = MemoryItem(p.data.addr, p.data.obj, p.data.t, guard)
+                    self._symbolic_memory.add(p.begin, p.end, i)
+                    count += 1
+        except Exception as e:
+            pdb.set_trace()
+
+        return count

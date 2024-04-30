@@ -1,6 +1,6 @@
 import pdb
 import sys
-from typing import List, Union
+from typing import List, Union, Dict, Tuple,TypeVar
 
 from memory_mixins.clouseau_mixin import *
 from memory_mixins.unwrapper_mixin import *
@@ -17,7 +17,7 @@ from ..state_plugins import inspect as stateplug_inspect
 from sortedcontainers import SortedDict
 from ..errors import SimSegfaultError, SimMemoryError
 
-
+FSM = TypeVar("FSM", bound="FullSymbolicMemory")
 class MappedRegion(object):
     PROT_READ = 1
     PROT_WRITE = 2
@@ -182,7 +182,7 @@ class FullSymbolicMemory(
             self._initial_timestamps = None
 
     @property
-    def _pages(self):
+    def _pages(self) -> Dict[int:MemoryItem]:
         return self._concrete_memory.pages
 
     def _init_memory(self):
@@ -246,7 +246,7 @@ class FullSymbolicMemory(
         for e in to_remove:
             del self._initializable[e]
 
-    def memory_op(self, addr, size, data=None, op=None):
+    def memory_op(self, addr, size, data=None, op=None) -> Tuple[int,int,str]:
         addr = _raw_ast(addr)
         size = _raw_ast(size)
         data = _raw_ast(data)
@@ -285,17 +285,17 @@ class FullSymbolicMemory(
 
         return addr, size, reg_name
 
-    def _reverse_addr_reg(self, addr):
+    def _reverse_addr_reg(self, addr) -> str:
         for name, offset_size in self.state.arch.registers.iteritems():
             offset = offset_size[0]
             size = offset_size[1]
             if addr in range(offset, offset + size):
                 return name
 
-    def _convert_to_ast(self, thing, size, byte_width):
+    def _convert_to_ast(self, thing, size, byte_width) -> Union[claripy.ast.bv.BV,claripy.BVV,claripy.FPV]:
         return super()._convert_to_ast(thing, size, byte_width)
 
-    def get_unconstrained_bytes(self, name, bits, memory=None):
+    def get_unconstrained_bytes(self, name, bits, memory=None) -> claripy.BVV:
         if (memory is not None and memory.category == 'mem' and
                 options.ZERO_FILL_UNCONSTRAINED_MEMORY in self.state.options):
             return claripy.BVV(0, bits)
@@ -303,67 +303,50 @@ class FullSymbolicMemory(
         return state.solver.Unconstrained(name, bits)
 
     # Angr does state forking and not ite representation
-    def build_ite(self, addr, cases, v, obj):
-
+    def build_ite(self, addr, cases, v, obj) -> claripy.ast.bv.BV:
         assert len(cases) > 0
-
         if len(cases) == 1:
             cond = addr == cases[0].addr
         else:
             cond = self.state.se.And(addr >= cases[0].addr, addr <= cases[-1].addr)
-
         cond = claripy.And(cond, cases[0].guard) if cases[0].guard is not None else cond
-
         return self.state.se.If(cond, v, obj)
 
     # If we have build ite, we also need build merged ite
-    def build_merged_ite(self, addr, pointer, obj):
-
+    def build_merged_ite(self, addr, pointer, obj) -> claripy.ast.bv.BV:
         n = len(pointer)
         merged_p = []
         for i in range(n):
-
             p = pointer[i]
             v = p.obj
-
             is_good_candidate = type(p.addr) in int and p.guard is None
             mergeable = False
-
             if len(merged_p) > 0 and is_good_candidate \
                     and p.addr == merged_p[-1].addr + 1:
-
                 prev_v = merged_p[-1].obj
                 if v.op == 'BVV':
-
                     # both constant and equal
                     if prev_v.op == 'BVV' and v.args[0] == prev_v.args[0]:
                         mergeable = True
-
                 # same symbolic object
                 elif v is prev_v:
                     mergeable = True
 
             if not mergeable:
-
                 if len(merged_p) > 0:
                     obj = self.build_ite(addr, merged_p, merged_p[-1].obj, obj)
                     merged_p = []
-
                 if is_good_candidate:
                     merged_p.append(p)
                 else:
                     obj = self.build_ite(addr, [p], v, obj)
-
             else:
                 merged_p.append(p)
-
         if len(merged_p) > 0:
             obj = self.build_ite(addr, merged_p, merged_p[-1].obj, obj)
-
         return obj
 
-    def same(self, a, b):
-
+    def same(self, a, b) -> bool:
         if False and id(a) == id(b):
             return True
         try:
@@ -374,7 +357,7 @@ class FullSymbolicMemory(
             traceback.print_exc()
             sys.exit(1)
 
-    def copy(self):
+    def copy(self) -> FSM:
         s = FullSymbolicMemory(cle_memory_backer=self._memory_backer,  # memory_backer
                                memory_id=self._id,  # kind
                                permissions_map=self._permissions_backer,  # permissions_backer
@@ -392,7 +375,7 @@ class FullSymbolicMemory(
 
         return s
 
-    def merge(self, others, merge_conditions, common_ancestor=None):
+    def merge(self, others, merge_conditions, common_ancestor=None) -> int:
         assert common_ancestor is not None
         if type(common_ancestor) in (SimStateHistory,):
             ancestor_timestamp = common_ancestor.timestamps[0]
@@ -414,7 +397,7 @@ class FullSymbolicMemory(
         return count
 
     def load(self, addr, size=None, condition=None, fallback=None, add_constraints=None, action=None, endness=None,
-             inspect=True, disable_actions=False, ret_on_segv=False, internal=False, ignore_endness=False):
+             inspect=True, disable_actions=False, ret_on_segv=False, internal=False, ignore_endness=False) -> claripy.ast.bv.BV:
 
         assert add_constraints is None
 
@@ -460,10 +443,8 @@ class FullSymbolicMemory(
                     if min_addr == max_addr:
                         addr = min_addr
 
-                # check permissions
                 self.check_sigsegv_and_refine(addr, min_addr, max_addr, False)
 
-                # check if binary data should be loaded into address space
                 self._load_init_data(min_addr, (max_addr - min_addr) + size)
 
                 data = None
@@ -546,11 +527,7 @@ class FullSymbolicMemory(
             sys.exit(1)
 
     def store(self, addr, data, size=None, condition=None, add_constraints=None, endness=None, action=None,
-              inspect=True, priv=None, disable_actions=False, ignore_endness=False, internal=False):
-
-        if not internal:
-            pass
-
+              inspect=True, priv=None, disable_actions=False, ignore_endness=False, internal=False) -> None:
         if priv is not None:
             self.state.scratch.push_priv(priv)
 

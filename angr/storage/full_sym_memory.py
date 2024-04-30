@@ -1,12 +1,14 @@
 import pdb
 import sys
+from typing import List, Union
+
 from memory_mixins.clouseau_mixin import *
 from memory_mixins.unwrapper_mixin import *
 from memory_mixins.bvv_conversion_mixin import DataNormalizationMixin
 from memory_mixins.name_resolution_mixin import NameResolutionMixin
-from memory_mixins.paged_memory.pages import UltraPage
+from paged_memory import PagedMemory
 from .. import sim_options as options
-import pitree
+from pitree import pitree
 import claripy
 import cle
 from ..state_plugins.sim_action_object import _raw_ast
@@ -21,7 +23,7 @@ class MappedRegion(object):
     PROT_WRITE = 2
     PROT_EXEC = 4
 
-    def __init__(self, addr, length, permissions):
+    def __init__(self, addr: int, length: int, permissions: claripy.bv):
         self.addr = addr
         self.length = length
         self.permissions = permissions
@@ -32,27 +34,27 @@ class MappedRegion(object):
         rwx_s += "x" if self.is_executable() else ''
         return "(" + str(hex(self.addr)) + ", " + str(hex(self.addr + self.length)) + ") [" + rwx_s + "]"
 
-    def is_readable(self):
+    def is_readable(self) -> bool:
         return self.permissions.args[0] & MappedRegion.PROT_READ
 
-    def is_writable(self):
+    def is_writable(self) -> bool:
         return self.permissions.args[0] & MappedRegion.PROT_WRITE
 
-    def is_executable(self):
+    def is_executable(self) -> bool:
         return self.permissions.args[0] & MappedRegion.PROT_EXEC
 
 
 class MemoryItem(object):
     __slots__ = ('addr', '_obj', 't', 'guard')
 
-    def __init__(self, addr, obj, t, guard):
+    def __init__(self, addr: int, obj: Union[claripy.ast.bv.BV, List[claripy.ast.bv.BV,]], t: int, guard):
         self.addr = addr
         self._obj = obj
         self.t = t
         self.guard = guard
 
     @property
-    def obj(self):
+    def obj(self) -> claripy.ast.bv.BV:
         if type(self._obj) in (list,):
             val = self._obj[0].bv(self._obj[1])
             self._obj = val
@@ -61,8 +63,7 @@ class MemoryItem(object):
     def __repr__(self):
         return "[" + str(self.addr) + ", " + str(self.obj) + ", " + str(self.t) + ", " + str(self.guard) + "]"
 
-    # noinspection PyProtectedMember
-    def _compare_obj(self, other):
+    def _compare_obj(self, other) -> bool:
 
         if id(self._obj) == id(other._obj):
             return True
@@ -122,16 +123,16 @@ class FullSymbolicMemory(
                  cle_memory_backer: cle.memory.Clemory = None,  # memory_backer
                  memory_id: str = None,  # kind
                  permissions_map: dict = None,  # permissions_backer
-                 mapped_regions: object = None,  # mapped_regions
+                 mapped_regions: List[MappedRegion] = None,  # mapped_regions
                  stack_end: int = None,  # recreate stack_range
                  stack_size: int = None,
                  timestamp: int = 0,
                  timestamp_implicit: int = 0,
                  initialized: bool = False,
-                 initializable: object = None,
-                 concrete_memory: object = None,
-                 symbolic_memory: object = None,
-                 **kwargs: object):
+                 initializable: SortedDict = None,
+                 concrete_memory: PagedMemory = None,
+                 symbolic_memory: pitree() = None,
+                 **kwargs):
         if mapped_regions is None:
             mapped_regions = []
         self._memory_backer = cle_memory_backer
@@ -139,9 +140,9 @@ class FullSymbolicMemory(
         self.permissions_backer = permissions_map
         self._initializable = initializable if initializable is not None else SortedDict(key=lambda x: x[0])
         self._initialized = initialized
-        self._symbolic_memory = pitree.pitree() if symbolic_memory is None else symbolic_memory
-        # TODO: Need to figure what mixin to call for a pass through for ultra page
-        self._concrete_memory = UltraPage(memory=self._symbolic_memory) if concrete_memory is None else concrete_memory
+        self._symbolic_memory = pitree() if symbolic_memory is None else symbolic_memory
+        # Moved to memsight's implementation of concrete memory
+        self._concrete_memory = PagedMemory(memory=self, **kwargs) if concrete_memory is None else concrete_memory
         self._stack_end = stack_end
         self._maximum_symbolic_size = 8 * 1024
         self._maximum_concrete_size = 0x1000000
@@ -157,7 +158,7 @@ class FullSymbolicMemory(
         return self.state.history.timestamps[0]
 
     @timestamp.setter
-    def timestamp(self, value):
+    def timestamp(self, value: int):
         assert self.state is not None
         self.init_timestamps()
         self.state.history.timestamps[0] = value
@@ -169,7 +170,7 @@ class FullSymbolicMemory(
         return self.state.history.timestamps[1]
 
     @implicit_timestamp.setter
-    def implicit_timestamp(self, value):
+    def implicit_timestamp(self, value: int):
         assert self.state is not None
         self.init_timestamps()
         self.state.history.timestamps[1] = value
@@ -182,7 +183,7 @@ class FullSymbolicMemory(
 
     @property
     def _pages(self):
-        return self._concrete_memory._pages
+        return self._concrete_memory.pages
 
     def _init_memory(self):
         if self._initialized:
@@ -191,7 +192,7 @@ class FullSymbolicMemory(
         # init map region
         for start, end in self._permissions_backer[1]:
             perms = self._permissions_backer[1][(start, end)]
-            self.map_region(start, end - start, perms, internal=True)
+            self.map_region(start, end - start, perms)
 
         # Used backers inplace of cbackers. Backer is bytearray or Clemory object
         try:
@@ -229,7 +230,7 @@ class FullSymbolicMemory(
         to_remove = []
         while k < len(self._initializable) and self._initializable[k][0] <= page_end:
             data = self._initializable[k]  # [page_index, data, data_offset, page_offset, min(size, page_size]
-            page = self._concrete_memory._pages[data[0]] if data[0] in self._concrete_memory._pages else None
+            page = self._concrete_memory.pages[data[0]] if data[0] in self._concrete_memory.pages else None
             for j in range(data[4]):
 
                 if page is not None and data[3] + j in page:
@@ -405,7 +406,7 @@ class FullSymbolicMemory(
 
         count = self._merge_concrete_memory(others[0], merge_conditions)
         count += self._merge_symbolic_memory(others[0], merge_conditions, ancestor_timestamp,
-                                            ancestor_implicit_timestamp)
+                                             ancestor_implicit_timestamp)
 
         self.timestamp = max(self.timestamp, others[0].timestamp) + 1
         self.implicit_timestamp = min(self.implicit_timestamp, others[0].implicit_timestamp)
@@ -658,7 +659,7 @@ class FullSymbolicMemory(
                     if constant_addr:
 
                         assert addr == min_addr
-                        # This is a tuple and not a page
+                        # This is a tuple(pointer) and not a page
                         P = self._concrete_memory[min_addr + k]
                         if P is None or condition is None:
                             self._concrete_memory[min_addr + k] = MemoryItem(min_addr + k, obj, self.timestamp,
@@ -953,10 +954,9 @@ class FullSymbolicMemory(
             LL.append(l)
         return LL
 
-    def _merge_symbolic_memory(self, other, merge_conditions, ancestor_timestamp, ancestor_timestamp_implicit,
-                               verbose=False):
+    def _merge_symbolic_memory(self, other, merge_conditions, ancestor_timestamp, ancestor_timestamp_implicit):
+        count = 0
         try:
-            count = 0
             pointer = self._symbolic_memory.search(0, sys.maxsize * 2 + 1)
             for p in pointer:
                 # assert p.data.t >= 0
@@ -968,7 +968,6 @@ class FullSymbolicMemory(
                     self._symbolic_memory.update_item(p, i)
                     count += 1
         except Exception as e:
-            error = 1
             pdb.set_trace()
 
         try:
